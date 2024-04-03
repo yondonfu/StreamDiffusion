@@ -64,9 +64,9 @@ def main(
         use_lcm_lora=False,
         vae_id=None,
         acceleration=acceleration,
-        #mode="txt2img", #TODO error: "text_embeds" not in added_cond_kwargs
+        mode="txt2img",
         use_denoising_batch=use_denoising_batch,
-        cfg_type = "self",
+        cfg_type = "none",
         seed=seed,
     )
     
