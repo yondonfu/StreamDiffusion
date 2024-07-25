@@ -77,6 +77,8 @@ class StreamDiffusion:
 
         self.sdxl = type(self.pipe) is StableDiffusionXLPipeline
 
+        self.image_embeds = None
+
     def load_lcm_lora(
         self,
         pretrained_model_name_or_path_or_dict: Union[
@@ -113,6 +115,15 @@ class StreamDiffusion:
             safe_fusing=safe_fusing,
         )
 
+    def load_ip_adapter(
+        self,
+        pretrained_ip_adapter_model_name_or_path_or_dict: Union[str, Dict[str, torch.Tensor]],
+        scale: float = 0.6,
+        **kwargs
+    ) -> None:
+        self.pipe.load_ip_adapter(pretrained_ip_adapter_model_name_or_path_or_dict, **kwargs)
+        self.pipe.set_ip_adapter_scale(scale)
+
     def enable_similar_image_filter(self, threshold: float = 0.98, max_skip_frame: float = 10) -> None:
         self.similar_image_filter = True
         self.similar_filter.set_threshold(threshold)
@@ -126,6 +137,8 @@ class StreamDiffusion:
         self,
         prompt: str,
         negative_prompt: str = "",
+        ip_adapter_image: PIL.Image.Image = None,
+        ip_adapter_image_embeds: List[torch.Tensor] = None,
         num_inference_steps: int = 50,
         guidance_scale: float = 1.2,
         delta: float = 1.0,
@@ -167,6 +180,9 @@ class StreamDiffusion:
             negative_prompt=negative_prompt,
         )
         self.prompt_embeds = encoder_output[0].repeat(self.batch_size, 1, 1)
+
+        if ip_adapter_image is not None or ip_adapter_image_embeds is not None:
+            self.update_ip_adapter_image_embeds(ip_adapter_image=ip_adapter_image, ip_adapter_image_embeds=ip_adapter_image_embeds)
 
         if self.sdxl:
             self.add_text_embeds = encoder_output[2]
@@ -275,6 +291,15 @@ class StreamDiffusion:
             do_classifier_free_guidance=False,
         )
         self.prompt_embeds = encoder_output[0].repeat(self.batch_size, 1, 1)
+
+    def update_ip_adapter_image_embeds(self, ip_adapter_image: Optional[PIL.Image.Image] = None, ip_adapter_image_embeds: Optional[List[torch.Tensor]] = None):
+        self.image_embeds = self.pipe.prepare_ip_adapter_image_embeds(
+            ip_adapter_image=ip_adapter_image,
+            ip_adapter_image_embeds=ip_adapter_image_embeds,
+            device=self.device,
+            num_images_per_prompt=1,
+            do_classifier_free_guidance=True
+        )
 
     def add_noise(
         self,
@@ -424,18 +449,27 @@ class StreamDiffusion:
         added_cond_kwargs = {}
         prev_latent_batch = self.x_t_latent_buffer
         if self.use_denoising_batch:
+            print("got to denoising batch")
             t_list = self.sub_timesteps_tensor
             if self.denoising_steps_num > 1:
                 x_t_latent = torch.cat((x_t_latent, prev_latent_batch), dim=0)
                 self.stock_noise = torch.cat(
                     (self.init_noise[0:1], self.stock_noise[:-1]), dim=0
                 )
+            print("prepping sdxl")
             if self.sdxl:
                 added_cond_kwargs = {"text_embeds": self.add_text_embeds.to(self.device), "time_ids": self.add_time_ids.to(self.device)}
 
+            print("prepping image_embeds")
+            if self.image_embeds is not None:
+                print("image_embeds here")
+                added_cond_kwargs["image_embeds"] = self.image_embeds
+
             x_t_latent = x_t_latent.to(self.device)
             t_list = t_list.to(self.device)
+            print("calling unet_step")
             x_0_pred_batch, model_pred = self.unet_step(x_t_latent, t_list, added_cond_kwargs=added_cond_kwargs)
+            print("finished unet_step")
             
             if self.denoising_steps_num > 1:
                 x_0_pred_out = x_0_pred_batch[-1].unsqueeze(0)
@@ -461,6 +495,10 @@ class StreamDiffusion:
                 )
                 if self.sdxl:
                     added_cond_kwargs = {"text_embeds": self.add_text_embeds.to(self.device), "time_ids": self.add_time_ids.to(self.device)}
+
+                if self.image_embeds is not None:
+                    added_cond_kwargs["image_embeds"] = self.image_embeds
+
                 x_0_pred, model_pred = self.unet_step(x_t_latent, t, idx=idx, added_cond_kwargs=added_cond_kwargs)
                 if idx < len(self.sub_timesteps_tensor) - 1:
                     if self.do_add_noise:

@@ -188,6 +188,8 @@ class StreamDiffusionWrapper:
         self,
         prompt: str,
         negative_prompt: str = "",
+        ip_adapter_image: Image.Image = None,
+        ip_adapter_image_embeds: List[torch.Tensor] = None,
         num_inference_steps: int = 50,
         guidance_scale: float = 1.2,
         delta: float = 1.0,
@@ -210,6 +212,8 @@ class StreamDiffusionWrapper:
         self.stream.prepare(
             prompt,
             negative_prompt,
+            ip_adapter_image=ip_adapter_image,
+            ip_adapter_image_embeds=ip_adapter_image_embeds,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
             delta=delta,
@@ -219,6 +223,8 @@ class StreamDiffusionWrapper:
         self,
         image: Optional[Union[str, Image.Image, torch.Tensor]] = None,
         prompt: Optional[str] = None,
+        ip_adapter_image: Optional[Image.Image] = None,
+        ip_adapter_image_embeds: Optional[List[torch.Tensor]] = None
     ) -> Union[Image.Image, List[Image.Image]]:
         """
         Performs img2img or txt2img based on the mode.
@@ -236,12 +242,12 @@ class StreamDiffusionWrapper:
             The generated image.
         """
         if self.mode == "img2img":         
-            return self.img2img(image, prompt)            
+            return self.img2img(image, prompt, ip_adapter_image, ip_adapter_image_embeds)
         else:
-            return self.txt2img(prompt)
+            return self.txt2img(prompt, ip_adapter_image, ip_adapter_image_embeds)
 
     def txt2img(
-        self, prompt: Optional[str] = None
+        self, prompt: Optional[str] = None, ip_adapter_image: Optional[Image.Image] = None, ip_adapter_image_embeds: Optional[List[torch.Tensor]] = None
     ) -> Union[Image.Image, List[Image.Image], torch.Tensor, np.ndarray]:
         """
         Performs txt2img.
@@ -258,6 +264,9 @@ class StreamDiffusionWrapper:
         """
         if prompt is not None:
             self.stream.update_prompt(prompt)
+
+        if ip_adapter_image is not None or ip_adapter_image_embeds is not None:
+            self.stream.update_ip_adapter_image_embeds(ip_adapter_image, ip_adapter_image_embeds)
 
         if self.sd_turbo:
             image_tensor = self.stream.txt2img_sd_turbo(self.batch_size)
@@ -278,7 +287,7 @@ class StreamDiffusionWrapper:
         return image
 
     def img2img(
-        self, image: Union[str, Image.Image, torch.Tensor], prompt: Optional[str] = None
+        self, image: Union[str, Image.Image, torch.Tensor], prompt: Optional[str] = None, ip_adapter_image: Optional[Image.Image] = None, ip_adapter_image_embeds: Optional[List[torch.Tensor]] = None
     ) -> Union[Image.Image, List[Image.Image], torch.Tensor, np.ndarray]:
         """
         Performs img2img.
@@ -295,6 +304,9 @@ class StreamDiffusionWrapper:
         """
         if prompt is not None:
             self.stream.update_prompt(prompt)
+
+        if ip_adapter_image is not None or ip_adapter_image_embeds is not None:
+            self.stream.update_ip_adapter_image_embeds(ip_adapter_image, ip_adapter_image_embeds)
 
         if isinstance(image, str) or isinstance(image, Image.Image):
             image = self.preprocess_image(image)
