@@ -17,6 +17,9 @@ torch.set_grad_enabled(False)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
+class CudaStreamPtr:
+    def __init__(self, cuda_stream_handle):
+        self.ptr = cuda_stream_handle
 
 class StreamDiffusionWrapper:
     def __init__(
@@ -47,6 +50,7 @@ class StreamDiffusionWrapper:
         seed: int = 2,
         use_safety_checker: bool = False,
         engine_dir: Optional[Union[str, Path]] = "engines",
+        cuda_stream_handle: Optional[int] = None
     ):
         """
         Initializes the StreamDiffusionWrapper.
@@ -163,6 +167,7 @@ class StreamDiffusionWrapper:
             cfg_type=cfg_type,
             seed=seed,
             engine_dir=engine_dir,
+            cuda_stream_handle=cuda_stream_handle,
         )
 
         if device_ids is not None:
@@ -362,6 +367,7 @@ class StreamDiffusionWrapper:
         cfg_type: Literal["none", "full", "self", "initialize"] = "self",
         seed: int = 2,
         engine_dir: Optional[Union[str, Path]] = "engines",
+        cuda_stream_handle: Optional[int] = None
     ) -> StreamDiffusion:
         """
         Loads the model.
@@ -599,7 +605,10 @@ class StreamDiffusionWrapper:
                         else stream.frame_bff_size,
                     )
 
-                cuda_stream = cuda.Stream()
+                if cuda_stream_handle is None:
+                    cuda_stream = cuda.Stream()
+                else:
+                    cuda_stream = CudaStreamPtr(cuda_stream_handle=cuda_stream_handle)
 
                 vae_config = stream.vae.config
                 vae_dtype = stream.vae.dtype
