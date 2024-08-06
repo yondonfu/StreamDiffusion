@@ -6,7 +6,8 @@ from typing import List, Literal, Optional, Union, Dict
 
 import numpy as np
 import torch
-from diffusers import AutoencoderTiny, StableDiffusionPipeline
+from controlnet_aux import HEDdetector
+from diffusers import AutoencoderTiny, StableDiffusionPipeline, StableDiffusionControlNetPipeline, ControlNetModel
 from PIL import Image
 
 from streamdiffusion import StreamDiffusion
@@ -26,6 +27,8 @@ class StreamDiffusionWrapper:
         self,
         model_id_or_path: str,
         t_index_list: List[int],
+        controlnet_id_or_path: Optional[str] = None,
+        controlnet_processor_id: Optional[str] = "hed",
         lora_dict: Optional[Dict[str, float]] = None,
         mode: Literal["img2img", "txt2img"] = "img2img",
         output_type: Literal["pil", "pt", "np", "latent"] = "pil",
@@ -156,6 +159,8 @@ class StreamDiffusionWrapper:
         self.stream: StreamDiffusion = self._load_model(
             model_id_or_path=model_id_or_path,
             lora_dict=lora_dict,
+            controlnet_id_or_path=controlnet_id_or_path,
+            controlnet_processor_id=controlnet_processor_id,
             lcm_lora_id=lcm_lora_id,
             vae_id=vae_id,
             t_index_list=t_index_list,
@@ -356,6 +361,8 @@ class StreamDiffusionWrapper:
         self,
         model_id_or_path: str,
         t_index_list: List[int],
+        controlnet_id_or_path: Optional[str] = None,
+        controlnet_processor_id: Optional[str] = "hed",
         lora_dict: Optional[Dict[str, float]] = None,
         lcm_lora_id: Optional[str] = None,
         vae_id: Optional[str] = None,
@@ -419,15 +426,44 @@ class StreamDiffusionWrapper:
             The loaded model.
         """
 
+        if controlnet_id_or_path is not None:
+            try:
+                controlnet = ControlNetModel.from_pretrained(controlnet_id_or_path, device=self.device, dtype=self.dtype)
+            except ValueError:
+                controlnet = ControlNetModel.from_single_file(controlnet_id_or_path, device=self.device, dtype=self.dtype)
+            except Exception:
+                traceback.print_exc()
+                print("ControlNet model load has filed. Doesn't exist,")
+                exit()
+
+            if controlnet_processor_id == "hed":
+                controlnet_processor = HEDdetector.from_pretrained("lllyasviel/ControlNet")
+            else:
+                traceback.print_exc()
+                print("ControlNet conditioning not supported.")
+                exit()
+
         try:  # Load from local directory
-            pipe: StableDiffusionPipeline = StableDiffusionPipeline.from_pretrained(
-                model_id_or_path,
-            ).to(device=self.device, dtype=self.dtype)
+            if controlnet:
+                pipe = StableDiffusionControlNetPipeline.from_pretrained(
+                    model_id_or_path,
+                    controlnet=controlnet
+                ).to(device=self.device, dtype=self.dtype)
+            else:
+                pipe: StableDiffusionPipeline = StableDiffusionPipeline.from_pretrained(
+                    model_id_or_path,
+                ).to(device=self.device, dtype=self.dtype)
 
         except ValueError:  # Load from huggingface
-            pipe: StableDiffusionPipeline = StableDiffusionPipeline.from_single_file(
-                model_id_or_path,
-            ).to(device=self.device, dtype=self.dtype)
+            if controlnet:
+                pipe = StableDiffusionControlNetPipeline.from_single_file(
+                    model_id_or_path,
+                    controlnet=controlnet
+                ).to(device=self.device, dtype=self.dtype)
+            else:
+                pipe: StableDiffusionPipeline = StableDiffusionPipeline.from_single_file(
+                    model_id_or_path,
+                ).to(device=self.device, dtype=self.dtype)
         except Exception:  # No model found
             traceback.print_exc()
             print("Model load has failed. Doesn't exist.")
@@ -435,6 +471,7 @@ class StreamDiffusionWrapper:
 
         stream = StreamDiffusion(
             pipe=pipe,
+            controlnet_processor=controlnet_processor,
             t_index_list=t_index_list,
             torch_dtype=self.dtype,
             width=self.width,
