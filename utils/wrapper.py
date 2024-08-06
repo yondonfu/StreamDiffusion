@@ -426,6 +426,9 @@ class StreamDiffusionWrapper:
             The loaded model.
         """
 
+        controlnet = None
+        controlnet_processor = None
+
         if controlnet_id_or_path is not None:
             try:
                 controlnet = ControlNetModel.from_pretrained(controlnet_id_or_path, device=self.device, dtype=self.dtype)

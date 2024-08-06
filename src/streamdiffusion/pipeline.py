@@ -9,7 +9,6 @@ from diffusers.image_processor import VaeImageProcessor
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img import (
     retrieve_latents,
 )
-from controlnet_aux import Processor
 
 from streamdiffusion.image_filter import SimilarImageFilter
 
@@ -19,7 +18,7 @@ class StreamDiffusion:
         self,
         pipe: StableDiffusionPipeline,
         t_index_list: List[int],
-        controlnet_processor: Optional[Processor] = None,
+        controlnet_processor: Optional[any] = None,
         torch_dtype: torch.dtype = torch.float16,
         width: int = 512,
         height: int = 512,
