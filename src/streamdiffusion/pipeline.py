@@ -476,7 +476,6 @@ class StreamDiffusion:
         return x_0_pred_out
 
     def prepare_control_image(self, image: torch.Tensor) -> torch.Tensor:
-        image = v2.Compose([v2.ToPILImage()])(image.squeeze(0))
         cond = self.controlnet_processor(image)
 
         return self.pipe.prepare_image(
