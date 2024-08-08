@@ -431,16 +431,16 @@ class StreamDiffusionWrapper:
 
         if controlnet_id_or_path is not None:
             try:
-                controlnet = ControlNetModel.from_pretrained(controlnet_id_or_path, device=self.device, dtype=self.dtype)
+                controlnet = ControlNetModel.from_pretrained(controlnet_id_or_path, device=self.device, torch_dtype=self.dtype)
             except ValueError:
-                controlnet = ControlNetModel.from_single_file(controlnet_id_or_path, device=self.device, dtype=self.dtype)
+                controlnet = ControlNetModel.from_single_file(controlnet_id_or_path, device=self.device, torch_dtype=self.dtype)
             except Exception:
                 traceback.print_exc()
                 print("ControlNet model load has filed. Doesn't exist,")
                 exit()
 
             if controlnet_processor_id == "hed":
-                controlnet_processor = HEDdetector.from_pretrained("lllyasviel/ControlNet")
+                controlnet_processor = HEDdetector.from_pretrained("lllyasviel/Annotators").to("cuda")
             else:
                 traceback.print_exc()
                 print("ControlNet conditioning not supported.")
@@ -524,10 +524,12 @@ class StreamDiffusionWrapper:
                 from streamdiffusion.acceleration.tensorrt.engine import (
                     AutoencoderKLEngine,
                     UNet2DConditionModelEngine,
+                    UNet2DConditionControlNetModelEngine
                 )
                 from streamdiffusion.acceleration.tensorrt.models import (
                     VAE,
                     UNet,
+                    UNetControlNet,
                     VAEEncoder,
                 )
 
@@ -537,10 +539,15 @@ class StreamDiffusionWrapper:
                     min_batch_size: int,
                 ):
                     maybe_path = Path(model_id_or_path)
+
+                    use_controlnet = False
+                    if controlnet:
+                        use_controlnet = True
+
                     if maybe_path.exists():
-                        return f"{maybe_path.stem}--lcm_lora-{use_lcm_lora}--tiny_vae-{use_tiny_vae}--max_batch-{max_batch_size}--min_batch-{min_batch_size}--mode-{self.mode}"
+                        return f"{maybe_path.stem}--controlnet-{use_controlnet}--lcm_lora-{use_lcm_lora}--tiny_vae-{use_tiny_vae}--max_batch-{max_batch_size}--min_batch-{min_batch_size}--mode-{self.mode}"
                     else:
-                        return f"{model_id_or_path}--lcm_lora-{use_lcm_lora}--tiny_vae-{use_tiny_vae}--max_batch-{max_batch_size}--min_batch-{min_batch_size}--mode-{self.mode}"
+                        return f"{model_id_or_path}--controlnet-{use_controlnet}--lcm_lora-{use_lcm_lora}--tiny_vae-{use_tiny_vae}--max_batch-{max_batch_size}--min_batch-{min_batch_size}--mode-{self.mode}"
 
                 engine_dir = Path(engine_dir)
                 unet_path = os.path.join(
@@ -581,14 +588,25 @@ class StreamDiffusionWrapper:
 
                 if not os.path.exists(unet_path):
                     os.makedirs(os.path.dirname(unet_path), exist_ok=True)
-                    unet_model = UNet(
-                        fp16=True,
-                        device=stream.device,
-                        max_batch_size=stream.trt_unet_batch_size,
-                        min_batch_size=stream.trt_unet_batch_size,
-                        embedding_dim=stream.text_encoder.config.hidden_size,
-                        unet_dim=stream.unet.config.in_channels,
-                    )
+                    if controlnet:
+                        unet_model = UNetControlNet(
+                            fp16=True,
+                            device=stream.device,
+                            max_batch_size=stream.trt_unet_batch_size,
+                            min_batch_size=stream.trt_unet_batch_size,
+                            embedding_dim=stream.text_encoder.config.hidden_size,
+                            unet_dim=stream.unet.config.in_channels,
+                        )
+                    else:
+                        unet_model = UNet(
+                            fp16=True,
+                            device=stream.device,
+                            max_batch_size=stream.trt_unet_batch_size,
+                            min_batch_size=stream.trt_unet_batch_size,
+                            embedding_dim=stream.text_encoder.config.hidden_size,
+                            unet_dim=stream.unet.config.in_channels,
+                        )
+
                     compile_unet(
                         stream.unet,
                         unet_model,
@@ -653,9 +671,15 @@ class StreamDiffusionWrapper:
                 vae_config = stream.vae.config
                 vae_dtype = stream.vae.dtype
 
-                stream.unet = UNet2DConditionModelEngine(
-                    unet_path, cuda_stream, use_cuda_graph=False
-                )
+                if controlnet:
+                    stream.unet = UNet2DConditionControlNetModelEngine(
+                        unet_path, cuda_stream, use_cuda_graph=False
+                    )
+                else:
+                    stream.unet = UNet2DConditionModelEngine(
+                        unet_path, cuda_stream, use_cuda_graph=False
+                    )
+
                 stream.vae = AutoencoderKLEngine(
                     vae_encoder_path,
                     vae_decoder_path,

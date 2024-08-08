@@ -4,11 +4,13 @@ from typing import List, Optional, Union, Any, Dict, Tuple, Literal
 import numpy as np
 import PIL.Image
 import torch
-from diffusers import LCMScheduler, StableDiffusionPipeline
+from diffusers import LCMScheduler, StableDiffusionPipeline, StableDiffusionControlNetPipeline
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img import (
     retrieve_latents,
 )
+from .unet_2d_condition_controlnet import UNet2DConditionControlNetModel
+from torchvision.transforms import v2
 
 from streamdiffusion.image_filter import SimilarImageFilter
 
@@ -16,7 +18,7 @@ from streamdiffusion.image_filter import SimilarImageFilter
 class StreamDiffusion:
     def __init__(
         self,
-        pipe: StableDiffusionPipeline,
+        pipe: Union[StableDiffusionPipeline, StableDiffusionControlNetPipeline],
         t_index_list: List[int],
         controlnet_processor: Optional[any] = None,
         torch_dtype: torch.dtype = torch.float16,
@@ -72,7 +74,12 @@ class StreamDiffusion:
 
         self.scheduler = LCMScheduler.from_config(self.pipe.scheduler.config)
         self.text_encoder = pipe.text_encoder
-        self.unet = pipe.unet
+
+        if isinstance(pipe, StableDiffusionControlNetPipeline):
+            self.unet = UNet2DConditionControlNetModel(pipe.unet, pipe.controlnet)
+        else:
+            self.unet = pipe.unet
+
         self.vae = pipe.vae
 
         self.controlnet_processor = controlnet_processor
@@ -148,8 +155,19 @@ class StreamDiffusion:
                 dtype=self.dtype,
                 device=self.device,
             )
+            self.control_image_buffer = torch.zeros(
+                (
+                    (self.denoising_steps_num - 1) * self.frame_bff_size,
+                    3,
+                    self.height,
+                    self.width,
+                ),
+                dtype=self.dtype,
+                device=self.device,
+            )
         else:
             self.x_t_latent_buffer = None
+            self.control_image_buffer = None
 
         if self.cfg_type == "none":
             self.guidance_scale = 1.0
@@ -298,13 +316,11 @@ class StreamDiffusion:
 
         return denoised_batch
 
-    # def get_a_b_controlnet(self, a, b):
-    #     pass
-
     def unet_step(
         self,
         x_t_latent: torch.Tensor,
         t_list: Union[torch.Tensor, list[int]],
+        control_image: torch.Tensor = None,
         idx: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.guidance_scale > 1.0 and (self.cfg_type == "initialize"):
@@ -316,12 +332,20 @@ class StreamDiffusion:
         else:
             x_t_latent_plus_uc = x_t_latent
 
-        model_pred = self.unet(
-            x_t_latent_plus_uc,
-            t_list,
-            encoder_hidden_states=self.prompt_embeds,
-            return_dict=False,
-        )[0]
+        # self.pipe check is simpler because self.unet can vary depending on whether TensorRT is enabled
+        if isinstance(self.pipe, StableDiffusionControlNetPipeline):
+            model_pred = self.unet(
+                x_t_latent_plus_uc,
+                t_list,
+                encoder_hidden_states=self.prompt_embeds,
+                image=control_image,
+            )[0]
+        else:
+            model_pred = self.unet(
+                x_t_latent_plus_uc,
+                t_list,
+                encoder_hidden_states=self.prompt_embeds,
+            )[0]
 
         if self.guidance_scale > 1.0 and (self.cfg_type == "initialize"):
             noise_pred_text = model_pred[1:]
@@ -392,8 +416,9 @@ class StreamDiffusion:
         )[0]
         return output_latent
 
-    def predict_x0_batch(self, x_t_latent: torch.Tensor) -> torch.Tensor:
+    def predict_x0_batch(self, x_t_latent: torch.Tensor, control_image: torch.Tensor = None) -> torch.Tensor:
         prev_latent_batch = self.x_t_latent_buffer
+        prev_control_image = self.control_image_buffer
 
         if self.use_denoising_batch:
             t_list = self.sub_timesteps_tensor
@@ -402,7 +427,11 @@ class StreamDiffusion:
                 self.stock_noise = torch.cat(
                     (self.init_noise[0:1], self.stock_noise[:-1]), dim=0
                 )
-            x_0_pred_batch, model_pred = self.unet_step(x_t_latent, t_list)
+
+                if control_image:
+                    control_image = torch.cat((control_image, prev_control_image), dim=0)
+
+            x_0_pred_batch, model_pred = self.unet_step(x_t_latent, t_list, control_image=control_image)
 
             if self.denoising_steps_num > 1:
                 x_0_pred_out = x_0_pred_batch[-1].unsqueeze(0)
@@ -415,9 +444,13 @@ class StreamDiffusion:
                     self.x_t_latent_buffer = (
                         self.alpha_prod_t_sqrt[1:] * x_0_pred_batch[:-1]
                     )
+
+                if control_image:
+                    self.control_image_buffer = control_image[:-1]
             else:
                 x_0_pred_out = x_0_pred_batch
                 self.x_t_latent_buffer = None
+                self.control_image_buffer = None
         else:
             self.init_noise = x_t_latent
             for idx, t in enumerate(self.sub_timesteps_tensor):
@@ -426,7 +459,7 @@ class StreamDiffusion:
                 ).repeat(
                     self.frame_bff_size,
                 )
-                x_0_pred, model_pred = self.unet_step(x_t_latent, t, idx)
+                x_0_pred, model_pred = self.unet_step(x_t_latent, t, idx, control_image=control_image)
                 if idx < len(self.sub_timesteps_tensor) - 1:
                     if self.do_add_noise:
                         x_t_latent = self.alpha_prod_t_sqrt[
@@ -442,6 +475,22 @@ class StreamDiffusion:
 
         return x_0_pred_out
 
+    def prepare_control_image(self, image: torch.Tensor) -> torch.Tensor:
+        image = v2.Compose([v2.ToPILImage()])(image.squeeze(0))
+        cond = self.controlnet_processor(image)
+
+        return self.pipe.prepare_image(
+            image=cond,
+            width=512,
+            height=512,
+            batch_size=1,
+            num_images_per_prompt=1,
+            device="cuda",
+            dtype=torch.float16,
+            do_classifier_free_guidance=False,
+            guess_mode=False
+        )
+
     @torch.no_grad()
     def __call__(
         self, x: Union[torch.Tensor, PIL.Image.Image, np.ndarray] = None
@@ -449,10 +498,16 @@ class StreamDiffusion:
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
+
+        control_image = None
         if x is not None:
             x = self.image_processor.preprocess(x, self.height, self.width).to(
                 device=self.device, dtype=self.dtype
             )
+
+            if isinstance(self.pipe, StableDiffusionControlNetPipeline):
+                control_image = self.prepare_control_image(x)
+
             if self.similar_image_filter:
                 x = self.similar_filter(x)
                 if x is None:
@@ -464,7 +519,7 @@ class StreamDiffusion:
             x_t_latent = torch.randn((1, 4, self.latent_height, self.latent_width)).to(
                 device=self.device, dtype=self.dtype
             )
-        x_0_pred_out = self.predict_x0_batch(x_t_latent)
+        x_0_pred_out = self.predict_x0_batch(x_t_latent, control_image=control_image)
         x_output = self.decode_image(x_0_pred_out).detach().clone()
 
         self.prev_image_result = x_output
