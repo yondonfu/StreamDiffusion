@@ -6,7 +6,6 @@ from typing import List, Literal, Optional, Union, Dict
 
 import numpy as np
 import torch
-from controlnet_aux import HEDCudadetector
 from diffusers import AutoencoderTiny, StableDiffusionPipeline, StableDiffusionControlNetPipeline, ControlNetModel
 from PIL import Image
 
@@ -440,6 +439,8 @@ class StreamDiffusionWrapper:
                 exit()
 
             if controlnet_processor_id == "hed":
+                from controlnet_aux import HEDCudadetector
+
                 controlnet_processor = HEDCudadetector.from_pretrained("lllyasviel/Annotators").to("cuda")
             else:
                 traceback.print_exc()
