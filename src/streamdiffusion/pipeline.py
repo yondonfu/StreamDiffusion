@@ -10,7 +10,6 @@ from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img impo
     retrieve_latents,
 )
 from .unet_2d_condition_controlnet import UNet2DConditionControlNetModel
-from torchvision.transforms import v2
 
 from streamdiffusion.image_filter import SimilarImageFilter
 
