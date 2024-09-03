@@ -356,6 +356,96 @@ class StreamDiffusionWrapper:
         else:
             return postprocess_image(image_tensor, output_type=output_type)[0]
 
+    def _load_trt_model(
+        self,
+        model_id_or_path: str,
+        vae_id_or_path: str,
+        trt_vae_encoder_path: str,
+        trt_vae_decoder_path: str,
+        trt_unet_path: str,
+        t_index_list: List[int],
+        do_add_noise: bool = True,
+        cfg_type: Literal["none", "full", "self", "initialize"] = "self",
+        seed: int = 2,
+        cuda_stream_handle = None
+    ):
+        from polygraphy import cuda
+        from streamdiffusion.acceleration.tensorrt.engine import (
+            AutoencoderKLEngine,
+            UNet2DConditionModelEngine,
+        )
+        from transformers import CLIPTextModel, CLIPTokenizer
+        from diffusers import UNet2DConditionModel, DEISMultistepScheduler
+
+        if cuda_stream_handle is None:
+            cuda_stream = cuda.Stream()
+        else:
+            cuda_stream = CudaStreamPtr(cuda_stream_handle=cuda_stream_handle)
+
+        vae_config = AutoencoderTiny.from_config(AutoencoderTiny.load_config(vae_id_or_path)).config
+        vae_scale_factor = 2 ** (len(vae_config.block_out_channels) - 1)
+        vae = AutoencoderKLEngine(
+            trt_vae_encoder_path,
+            trt_vae_decoder_path,
+            cuda_stream,
+            vae_scale_factor,
+            use_cuda_graph=False,
+        )
+        setattr(vae, "config", vae_config)
+        setattr(vae, "dtype", self.dtype)
+
+        unet_config = UNet2DConditionModel.from_config(UNet2DConditionModel.load_config(model_id_or_path, subfolder="unet")).config
+        unet = UNet2DConditionModelEngine(
+            trt_unet_path, cuda_stream, use_cuda_graph=False
+        )
+        setattr(unet, "config", unet_config)
+
+        text_encoder = CLIPTextModel.from_pretrained(model_id_or_path, subfolder="text_encoder").to(self.device, dtype=self.dtype)
+        tokenizer = CLIPTokenizer.from_pretrained(model_id_or_path, subfolder="tokenizer")
+        scheduler = DEISMultistepScheduler.from_config(DEISMultistepScheduler.load_config(model_id_or_path, subfolder="scheduler"))
+
+        pipe = StableDiffusionPipeline(
+            vae=vae,
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
+            unet=unet,
+            scheduler=scheduler,
+            safety_checker=None,
+            feature_extractor=None,
+            requires_safety_checker=False
+        )
+
+        stream = StreamDiffusion(
+            pipe=pipe,
+            t_index_list=t_index_list,
+            torch_dtype=self.dtype,
+            width=self.width,
+            height=self.height,
+            do_add_noise=do_add_noise,
+            frame_buffer_size=self.frame_buffer_size,
+            use_denoising_batch=self.use_denoising_batch,
+            cfg_type=cfg_type,
+        )
+
+        if seed < 0: # Random seed
+            seed = np.random.randint(0, 1000000)
+
+        stream.prepare(
+            "",
+            "",
+            num_inference_steps=50,
+            guidance_scale=1.1
+            if stream.cfg_type in ["full", "self", "initialize"]
+            else 1.0,
+            generator=torch.manual_seed(seed),
+            seed=seed,
+        )
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        return stream
+
     def _load_model(
         self,
         model_id_or_path: str,
@@ -424,6 +514,38 @@ class StreamDiffusionWrapper:
         StreamDiffusion
             The loaded model.
         """
+
+        if acceleration == "tensorrt":
+            try:
+                engine_path = Path(engine_dir)
+
+                model_path = Path(model_id_or_path)
+                if model_path.exists():
+                    model_prefix = model_path.stem.replace("/", "--")
+                else:
+                    model_prefix = model_id_or_path.replace("/", "--")
+
+                engine_prefix = os.path.join(engine_path, f"engines--{model_prefix}")
+
+                trt_vae_encoder_path = os.path.join(engine_prefix, "vae_encoder.engine")
+                trt_vae_decoder_path = os.path.join(engine_prefix, "vae_decoder.engine")
+                trt_unet_path = os.path.join(engine_prefix, "unet.engine")
+
+                return self._load_trt_model(
+                    model_id_or_path=model_id_or_path,
+                    vae_id_or_path="madebyollin/taesd",
+                    trt_vae_encoder_path=trt_vae_encoder_path,
+                    trt_vae_decoder_path=trt_vae_decoder_path,
+                    trt_unet_path=trt_unet_path,
+                    t_index_list=t_index_list,
+                    do_add_noise=do_add_noise,
+                    cfg_type=cfg_type,
+                    seed=seed,
+                    cuda_stream_handle=cuda_stream_handle
+                )
+            except Exception:
+                traceback.print_exc()
+                print("Error trying to directly load TensorRT model - will try to compile")
 
         controlnet = None
         controlnet_processor = None
